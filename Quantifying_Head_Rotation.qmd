@@ -1,0 +1,376 @@
+---
+title: "Quantifying Head Rotation"
+author: "Weslee Nguyen"
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r, echo = FALSE, results = 'hide', warning = FALSE}
+
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(plotly)
+```
+
+## Step 1: Calculate Angles
+
+[**Problem**]{.underline}: Angles makes sense in 2D, but not really 3D.
+
+[**Idea**]{.underline}: The dot product quantifies angular similarity of alignment between 2 vectors, with $\theta = cos^{-1}(\frac{x \cdot y}{||x|| ||y||})$, so by definition, $x \cdot y = ||x|| ||y|| cos(\theta)$ by proof of plug-and-chug. But then the dot product is defined by $\theta$, which is defined by the dot product! Sure, $x \cdot y = \sum_{i=1}^3 x_i y_i$, but then $\theta$ comes from forcing that formula to work, which runs into the problem: why can't we use ANY formula we want to make to define $\theta$, like $x \cdot y =tan(\theta)$? There's 3 reasons:
+
+-   (**1**) cosine is a nice trig function where the inverse we're used to giving back angles
+
+-   (**2**) The dot product is 0 if the vectors are orthogonal, which we want the angle to return $\frac{\pi}{2}$ which is exactly what $cos^{-1}(0)$ is
+
+-   (**3**) The domain of $cos^{-1}$ is $[-1, 1]$, which requires we normalize the dot product
+
+Yet that still runs into the problem of circular logic that would otherwise make this $\theta$ formula useless because you're just bs-ing a definition that may not capture what you intuitively want with 3D angles: close vectors = close angles and vice versa.
+
+To avoid this circular logic, recall cosine is hypothenuse over adjacent, which the 3D analogy is the projection. Denote $p = proj_yx$, then $cos(\theta) = \frac{||p||}{||a||}$. Then $x \cdot y = ||x||||y|| \frac{||p||}{||a||} = ||p||||b||$. Thus, $\theta$ is encoded by the *direction of the projection*, e.g. if x and y are pretty aligned, then the projection doesn't have to travel that far $\iff$ $||p||$ is little and (+). But if they're pretty opposite $\iff ||p||$ is big and (-).
+
+So with the left, right ear and head markers x, y, and z, their 3D coordinate are vectors in $\mathbb{R}^3$. As we're interested in the head turn, we want to look at the inner product of $x - z, y - z$
+
+![](bat_vectors.jpg)
+
+Thus, we can endow [*ANY*]{.underline} inner product space, including ones with weird dimensions like ln(2)/ln(3), with a sense of "angles" as long there's a well-defined inner product. But that's for another time. This abstract notion may come in handy with different shapes like a spherical sphere instead of $\mathbb{R}^3$. Anyway, that's all to say use that $\theta$ formula above to plug-and-chug vectors $y - z$ and $x - z$ overtime:
+
+### Sub-Step #1.1: Clean Dataset
+
+```{r, warning = FALSE}
+
+# Must adjust base directory manually to each folder  
+# OG Locale: Z:\OptoExp\bat_opto_video\Te194\12212023
+base_dr <- "C:/Users/comth/Desktop/Work/Bat/Opto_Angles/"
+
+# Must also adjust manually if (1) missing trials + (2) trial amount
+# Sprintf forces there to be 3 digits to add in needed trailing zeros
+trials <- sprintf("%03d", 1:25)
+
+###################################################################################
+#                               IMPORTANT!!!!!
+
+# Thousands of unlabeled extra markers will also balloon the columns
+# That makes the data so big that if you run the for loop, it'll crash your laptop
+# R is good at read.csv-ing select rows, columns, but not at the same time
+# So you MUST go into the read.csv directly ... if the size is +5K KB, go in manually
+# Then scroll right until there's a blatant amount of empty "unlabeled" columns
+# Take the 1st, hold shift -> ctrl -> right arrow, then right click + delete
+# Lastly, SAVE!!! unless you want to do that AGAIN, and repeat for all nasty files
+###################################################################################
+
+# Load in data
+for (num in trials) {
+  
+  # Construct full file path name
+  file_path <- paste0(base_dr, "Teal194_", num, "_RB.csv")
+  
+  # Read the CSV file + assign to "Teal194_[num]"
+  # First two rows are skipped, else bugs out read.csv, thus need skip argument
+  # Each trial will be in the form "Teal194_[trial num]" for Dec. 21, 2023
+  assign(paste0("Teal194_", num), read.csv(file_path, skip = 2))
+}
+
+clean_data <- function(dataset_name){
+  dataset <- get(dataset_name)
+  
+  # Isolate Frames, Seconds
+  time <- dataset[, 1:2]
+  
+  # Select only columns starting with Marker, Rigid Body Marker useless af
+  markers <- grep("^Marker", colnames(dataset), value = TRUE)
+  markers_col <- dataset[, markers, drop = FALSE]
+  
+  # Isolate head markers (crown, left, right)
+  head_markers <- colnames(markers_col)[markers_col[1,] %in% 
+                  c("Te194:Crown", "Te194:Left", "Te194:Right")]
+  head_markers_col <- markers_col[, head_markers, drop = FALSE]
+  
+  # Combine :P
+  dataset <- cbind(time, head_markers_col)
+  
+  # Relabel the easy columns
+  colnames(dataset)[1:2] <- c("Frame", "Seconds")
+
+  # Now dynamically label Crown/Left/Right underscore x/y/z
+  for (i in 3:ncol(dataset)) {
+    
+      # 1st row stores if marker Crown/Left/Right
+      first_row_value <- gsub("Te194:", "", as.character(dataset[1, i]))
+      
+      # 4th row stores what dimension e.g. crown lies in like x, y, or z
+      fourth_row_value <- dataset[4, i]
+  
+      if (first_row_value %in% c("Crown", "Left", "Right") && 
+          fourth_row_value %in% c("X", "Y", "Z")) 
+      {
+          new_col_name <- paste0(first_row_value, "_", tolower(fourth_row_value))
+          colnames(dataset)[i] <- new_col_name
+      }
+  }
+  
+  # Now remove header rows
+  dataset <- dataset[-c(1:4),]
+  assign(dataset_name, dataset)
+}
+
+for (num in trials) {
+    dataset_name <- paste0("Teal194_", num)
+    assign(dataset_name, clean_data(dataset_name))
+    print(num)
+}
+```
+
+### Sub-Step #1.2: Figure Out WTF Markers to Use
+
+Note that this sub-step was early in the EDA process, but now useless / no longer useful. The animation was pretty but very laggy and bogged down my laptop.
+
+```{r}
+
+##################################################################################
+# NO LONGER USEFUL ... but I can't just throw away code I've toiled over :(
+# Ctrl+shift+c everything to comment or uncomment
+##################################################################################
+
+
+# # Goal: Visually determine which markers better capture head mvt
+# # Do so by animating the three vector mvt overtime
+# # 3D Plot of left ear
+# # Replace Te194_01_Flexible with Rigid to test
+# # Tested only on one trial, but I assume it's enough b/c standardized anyway
+# Te194_01 <- Te194_01[, -c(3:9, 16:21, 25:55, 65:82)]
+# Te194_01_Rigid <- Te194_01[-c(1:4), -c(12:20)]
+# Te194_01_Flexible <- Te194_01[-c(1:4), -c(3:11)]
+# 
+# # Frame, Seconds, Left, Crown, Right
+# col_names <- c("Frame", "Seconds", "Left_x", "Left_y", "Left_z", "Crown_x", 
+#                "Crown_y", "Crown_z", "Right_x", "Right_y", "Right_z")
+# 
+# names(Te194_01_Rigid) <- col_names
+# names(Te194_01_Flexible) <- col_names
+# 
+# fig <- plot_ly(
+#   data = Te194_01_Flexible, 
+#   x = ~Left_x, y = ~Left_y, z = ~Left_z,
+#   frame = ~Seconds, type = 'scatter3d', mode = 'markers',
+#   marker = list(size = 5, color = 'blue'),
+#   name = "Left"
+# )
+# 
+# # Add crown onto current figure
+# fig <- fig %>% add_trace(
+#   x = ~Crown_x, y = ~Crown_y, z = ~Crown_z,
+#   frame = ~Seconds, type = 'scatter3d', mode = 'markers',
+#   marker = list(size = 5, color = 'red'),
+#   name = "Crown"
+# )
+# 
+# # Copy paste code for right ear
+# fig <- fig %>% add_trace(
+#   x = ~Right_x, y = ~Right_y, z = ~Right_z, 
+#   frame = ~Seconds, type = 'scatter3d', mode = 'markers',
+#   marker = list(size = 5, color = 'green'),
+#   name = "Right"
+# )
+# 
+# # Layout + animation controls
+# fig <- fig %>% layout(
+#   scene = list(
+#     xaxis = list(title = 'X'),
+#     yaxis = list(title = 'Y'),
+#     zaxis = list(title = 'Z')
+#   ),
+#   title = "3D Animation of Crown + Left and Right Ear Overtime",
+#   updatemenus = list(
+#     list(
+#       type = "buttons", showactive = FALSE,
+#       x = 0.1, xanchor = "right", y = 0,  yanchor = "bottom",
+#       buttons = list(
+#         list(label = "Play", method = "animate",
+#           args = list(NULL, list(frame = list(duration = 100,
+#                                               redraw = TRUE), fromcurrent = TRUE))
+#         ),
+#         list(
+#           label = "Pause", method = "animate",
+#           args = list(NULL,
+#                       list(frame = list(duration = 0, redraw = FALSE),
+#                            mode = "immediate"))
+#         )))),
+#   frames = lapply(unique(Te194_01_Flexible$Seconds), function(sec) {
+#     list(
+#       data = list(
+#         list(x = Te194_01_Flexible$Left_x[Te194_01_Flexible$Seconds == sec],
+#              y = Te194_01_Flexible$Left_y[Te194_01_Flexible$Seconds == sec],
+#              z = Te194_01_Flexible$Left_z[Te194_01_Flexible$Seconds == sec],
+#              mode = "markers", 
+#              type = "scatter3d", 
+#              marker = list(size = 5, color = 'blue'),
+#              name = "Left"),
+#         list(x = Te194_01_Flexible$Crown_x[Te194_01_Flexible$Seconds == sec],
+#              y = Te194_01_Flexible$Crown_y[Te194_01_Flexible$Seconds == sec],
+#              z = Te194_01_Flexible$Crown_z[Te194_01_Flexible$Seconds == sec],
+#              mode = "markers", 
+#              type = "scatter3d", 
+#              marker = list(size = 5, color = 'red'),
+#              name = "Crown"),
+#         list(x = Te194_01_Flexible$Right_x[Te194_01_Flexible$Seconds == sec],
+#              y = Te194_01_Flexible$Right_y[Te194_01_Flexible$Seconds == sec],
+#              z = Te194_01_Flexible$Right_z[Te194_01_Flexible$Seconds == sec],
+#              mode = "markers", 
+#              type = "scatter3d", 
+#              marker = list(size = 5, color = 'green'),
+#              name = "Right")
+#       ),
+#       name = as.character(sec)
+#     )
+#   })
+# )
+# 
+# # When playing animation, obvious that "flexible" (non-rigid) body markers are
+# # meant to be the markers used upon head rotation + "waggles"
+# fig
+```
+
+### Sub-Step #1.3: Calculate 3D Angles and Plot
+
+```{r}
+
+get_head_vectors <- function(dataset_name) {
+  dataset <- get(dataset_name)
+  
+  # Convert numbers to numeric class
+  dataset[] <- lapply(dataset, function(col) as.numeric(as.character(col)))
+  
+  # Left - Crown vector
+  dataset$Left_Crown <- mapply(
+    function(x, y, z, cx, cy, cz) list(c(x - cx, y - cy, z - cz)),
+    dataset$Left_x, dataset$Left_y, dataset$Left_z,
+    dataset$Crown_x, dataset$Crown_y, dataset$Crown_z)
+  
+  # Right - Crown vector
+  dataset$Right_Crown <- mapply(
+      function(x, y, z, cx, cy, cz) list(c(x - cx, y - cy, z - cz)),
+      dataset$Right_x, dataset$Right_y, dataset$Right_z,
+      dataset$Crown_x, dataset$Crown_y, dataset$Crown_z)
+  
+  # Drop irrelevant left / crown/ right vectors
+  dataset <- dataset[, -c(3:11)]
+  return(dataset)
+}
+
+# Now actually get head vectors lol
+for (num in trials) {
+  dataset_name <- paste0("Teal194_", num)
+  cleaned_dataset <- get_head_vectors(dataset_name)
+  assign(dataset_name, cleaned_dataset)
+}
+
+# Get angle between any 2 3D vectors
+angle_inner_product <- function(x, y) {
+  dot_product <- sum(x*y)
+  norm_x <- sqrt(sum(x^2))
+  norm_y <- sqrt(sum(y^2))
+  horizontal <- dot_product / (norm_x * norm_y)
+  theta <- acos(horizontal)
+  return(theta)
+}
+
+# Compute angles for 2 entire column of 3D vectors
+compute_angles <- function(dataset_name) {
+  dataset <- get(dataset_name)
+  dataset$Angles <- mapply(
+    function(Left_Crown, Right_Crown) {
+      angle_inner_product(unlist(Left_Crown), unlist(Right_Crown))
+    },
+    dataset$Left_Crown,
+    dataset$Right_Crown
+  )
+  
+  return(dataset)
+}
+
+# Get angle between Left - Crown and Right - Crown vectors
+for (num in trials) {
+  dataset_name <- paste0("Teal194_", num)
+  angular_dataset <- compute_angles(dataset_name)
+  assign(dataset_name, angular_dataset)
+}
+
+# Why splines to interpolate? 
+# Short answer: Very good at smooth fitting a bunch of points
+# Long answer: https://www.youtube.com/watch?v=aVwxzDHniEw; SO BEAUTIFUL!!!
+# CI is weird, but it's still fundamental CI = y_hat + 1.96 x SE
+# y_hat = fitted value, SE is standard error, 1.96 is z-score from t distribution
+compute_splines <- function(dataset_name) {
+  dataset <- get(dataset_name)
+  spline_fit <- smooth.spline(dataset$Seconds, dataset$Angles)
+
+  # Get mean square error (MSE), then sqrt for standard error (SE)
+  fit_values <- spline_fit$y
+  resid <- dataset$Angles - fit_values
+  var <- mean(resid^2)
+  se <- sqrt(var)
+  
+  Upper_CI <- fit_values + 1.96*se
+  Lower_CI <- fit_values - 1.96*se
+  
+  spline_data <- data.frame(
+    Seconds = spline_fit$x,
+    Angles = fit_values,
+    Upper_CI = Upper_CI,
+    Lower_CI = Lower_CI
+  )
+  
+  return(spline_data)
+}
+
+spline_data_list <- list()
+
+for (num in trials) {
+  dataset_name <- paste0("Teal194_", num)
+  spline_data <- compute_splines(dataset_name)
+  spline_data_list[[dataset_name]] <- spline_data
+}
+
+generate_angle_plot <- function(dataset_name, spline_data, number) {
+  dataset <- get(dataset_name)
+  
+  # Convert angles from radians to degrees
+  dataset$Angles <- dataset$Angles * 180 / pi
+  spline_data$Angles <- spline_data$Angles * 180 / pi
+  spline_data$Upper_CI <- spline_data$Upper_CI * 180 / pi
+  spline_data$Lower_CI <- spline_data$Lower_CI * 180 / pi
+  
+  plot <- ggplot(data = dataset, aes(x = Seconds, y = Angles)) +
+    geom_point(color = "red", size = 1) +
+    geom_line(data = spline_data, aes(x = Seconds, y = Angles),
+              color = "purple", size = 1.5) +
+    geom_ribbon(data = spline_data,
+                aes(x = Seconds, ymin = Lower_CI, ymax = Upper_CI),
+                fill = "purple", alpha = 0.3) +
+    labs(
+      title = "Angles Between Left - Crown and Right - Crown Overtime",
+      subtitle = paste("Teal194, Trial", number, ", December 21, 2023"),
+      x = "Time (Seconds)",
+      y = "Angle (Radians)",
+      caption = "Spline Interpolation with 95% CI"
+    ) +
+    theme(plot.title = element_text(hjust = 0.5),
+          plot.subtitle = element_text(hjust = 0.5))
+  
+  return(plot)
+}
+
+plot_list <- list()
+
+for (num in trials) {
+    dataset_name <- paste0("Teal194_", num)
+    spline_data <- spline_data_list[[dataset_name]]
+    plot <- generate_angle_plot(dataset_name, spline_data, num)
+    plot_list[[dataset_name]] <- plot
+}
+
+print(plot_list)
+```
